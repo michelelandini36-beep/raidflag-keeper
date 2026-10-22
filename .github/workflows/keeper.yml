@@ -1,0 +1,50 @@
+name: Raidflag keeper and health
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '2-59/5 * * * *'
+permissions: {}
+concurrency:
+  group: raidflag-keeper
+  cancel-in-progress: false
+jobs:
+  keeper:
+    if: github.event_name == 'workflow_dispatch' || vars.RAID_KEEPER_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Run keeper and verify health
+        env:
+          SITE_URL: ${{ vars.RAID_SITE_URL }}
+          CRON_SECRET: ${{ secrets.RAID_CRON_SECRET }}
+          PREVIEW_BYPASS: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        shell: python
+        run: |
+          import json, os, sys, urllib.request
+          from urllib.parse import urlsplit
+          base = os.environ['SITE_URL'].rstrip('/')
+          url = urlsplit(base)
+          if url.scheme != 'https' or url.username or url.password or url.path or url.query or url.fragment:
+              sys.exit('Invalid site URL')
+          secret = os.environ['CRON_SECRET']
+          if not secret:
+              sys.exit('Missing keeper credential')
+          headers = {'Authorization': 'Bearer ' + secret}
+          bypass = os.environ.get('PREVIEW_BYPASS')
+          if bypass:
+              headers['x-vercel-protection-bypass'] = bypass
+          # Never forward credentials to a redirect destination.
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect())
+          for path, key, expected in [('/api/cron/keeper', 'ok', True), ('/api/health', 'status', 'ok')]:
+              try:
+                  with opener.open(urllib.request.Request(base + path, headers=headers), timeout=90) as response:
+                      body = json.load(response)
+                  if body.get(key) != expected:
+                      sys.exit('Operational check failed: ' + path)
+              except Exception:
+                  # Response bodies and exception URLs may contain private diagnostics.
+                  sys.exit('Request failed: ' + path + '; inspect the private Vercel logs')
+          print('Keeper and health checks passed.')
